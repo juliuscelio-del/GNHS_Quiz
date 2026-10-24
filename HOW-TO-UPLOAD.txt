@@ -1,0 +1,14 @@
+HOW TO PUT THIS ON GITHUB (Android build)
+
+1. Unzip this file. You get the project files directly (no extra folder).
+2. On github.com click  +  >  New repository. Name it (example: gnhs-quiz-android), click Create.
+3. Click "uploading an existing file", then drag ALL the unzipped files and folders in.
+   - IMPORTANT: include the hidden folder ".github".
+     On Mac press Cmd+Shift+. in Finder to show it. On Windows turn on View > Hidden items.
+   - Click "Commit changes".
+4. Open the "Actions" tab > "Build Android app" > "Run workflow".
+5. When it turns green, open the run and download the file under "Artifacts".
+
+IF YOU DON'T SEE ".github/workflows/build.yml" in your repo after uploading:
+   Click Add file > Create new file, type this as the name:  .github/workflows/build.yml
+   then paste in the contents of the file "build.yml.backup" from this zip, and commit.

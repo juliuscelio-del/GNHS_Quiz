@@ -1,0 +1,16 @@
+{
+  "name": "gnhs-quiz-android",
+  "version": "1.0.0",
+  "description": "GNHS Quiz student app for Android - finds the teacher's server automatically",
+  "author": "Julius Celio",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "test": "node test/discovery.test.js"
+  },
+  "dependencies": {
+    "@capacitor/android": "^6.2.0",
+    "@capacitor/cli": "^6.2.0",
+    "@capacitor/core": "^6.2.0"
+  }
+}

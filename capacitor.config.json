@@ -1,0 +1,10 @@
+{
+  "appId": "ph.edu.gnhs.quiz",
+  "appName": "GNHS Quiz",
+  "webDir": "www",
+  "server": {
+    "androidScheme": "http",
+    "cleartext": true,
+    "allowNavigation": ["*"]
+  }
+}
