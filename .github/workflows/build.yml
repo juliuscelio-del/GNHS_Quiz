@@ -20,6 +20,10 @@ jobs:
         run: |
           [ -d android ] || npx cap add android
           npx cap sync android
+      - name: Generate app icons
+        run: |
+          npm install --no-save @capacitor/assets
+          npx capacitor-assets generate --android
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug
