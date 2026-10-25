@@ -1,4 +1,4 @@
-name: Build Android app
+name: Build Android and Windows apps
 
 on:
   push:
@@ -31,4 +31,61 @@ jobs:
         with:
           name: GNHS-Quiz-Android
           path: android/app/build/outputs/apk/debug/*.apk
+          if-no-files-found: error
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20, cache: npm }
+      - run: npm ci
+      - run: npm test
+      - name: Package Windows app (Electron wrapper around www)
+        shell: bash
+        run: |
+          mkdir winapp
+          cp -r www winapp/www
+
+          cat > winapp/package.json <<'EOF'
+          {
+            "name": "gnhs-quiz",
+            "version": "1.0.0",
+            "description": "GNHS Quiz",
+            "author": "GNHS",
+            "main": "main.js",
+            "build": {
+              "appId": "com.gnhs.quiz",
+              "productName": "GNHS Quiz",
+              "files": ["main.js", "www/**/*"],
+              "win": { "target": "portable" },
+              "portable": { "artifactName": "GNHS-Quiz-Windows.exe" }
+            }
+          }
+          EOF
+
+          cat > winapp/main.js <<'EOF'
+          const { app, BrowserWindow, Menu } = require('electron');
+          const path = require('path');
+          function createWindow() {
+            const win = new BrowserWindow({
+              width: 1200,
+              height: 800,
+              autoHideMenuBar: true,
+              webPreferences: { contextIsolation: true, webSecurity: false }
+            });
+            Menu.setApplicationMenu(null);
+            win.loadFile(path.join(__dirname, 'www', 'index.html'));
+          }
+          app.whenReady().then(createWindow);
+          app.on('window-all-closed', () => app.quit());
+          EOF
+
+          cd winapp
+          npm install --save-dev electron@31 electron-builder@24
+          npx electron-builder --win portable --publish never
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GNHS-Quiz-Windows
+          path: winapp/dist/GNHS-Quiz-Windows.exe
           if-no-files-found: error
