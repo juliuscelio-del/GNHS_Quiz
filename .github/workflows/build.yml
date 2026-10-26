@@ -46,6 +46,8 @@ jobs:
         run: |
           mkdir winapp
           cp -r www winapp/www
+          mkdir -p winapp/build
+          cp assets/icon-only.png winapp/build/icon.png
 
           cat > winapp/package.json <<'EOF'
           {
@@ -57,8 +59,8 @@ jobs:
             "build": {
               "appId": "com.gnhs.quiz",
               "productName": "GNHS Quiz",
-              "files": ["main.js", "www/**/*"],
-              "win": { "target": "portable" },
+              "files": ["main.js", "build/icon.png", "www/**/*"],
+              "win": { "target": "portable", "icon": "build/icon.png" },
               "portable": { "artifactName": "GNHS-Quiz-Windows.exe" }
             }
           }
@@ -72,6 +74,7 @@ jobs:
               width: 1200,
               height: 800,
               autoHideMenuBar: true,
+              icon: path.join(__dirname, 'build', 'icon.png'),
               webPreferences: { contextIsolation: true, webSecurity: false }
             });
             Menu.setApplicationMenu(null);
