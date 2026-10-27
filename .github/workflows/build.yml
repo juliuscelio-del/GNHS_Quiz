@@ -95,7 +95,7 @@ jobs:
             "build": {
               "appId": "com.gnhs.quiz",
               "productName": "GNHS Quiz",
-              "files": ["main.js", "build/icon.png", "www/**/*"],
+              "files": ["main.js", "preload.js", "build/icon.png", "www/**/*"],
               "win": { "target": "nsis", "icon": "build/icon.png" },
               "nsis": {
                 "oneClick": true,
@@ -114,39 +114,66 @@ jobs:
           sed -i "s/__VERSION__/$VERSION/" winapp/package.json
 
           cat > winapp/main.js <<'EOF'
-          const { app, BrowserWindow, Menu } = require('electron');
+          const { app, BrowserWindow, Menu, ipcMain } = require('electron');
           const path = require('path');
           const { autoUpdater } = require('electron-updater');
 
+          let win = null;
+          const send = (s) => {
+            if (win && !win.isDestroyed()) win.webContents.send('updater-status', s);
+          };
+
           function createWindow() {
-            const win = new BrowserWindow({
+            win = new BrowserWindow({
               width: 1200,
               height: 800,
               autoHideMenuBar: true,
               icon: path.join(__dirname, 'build', 'icon.png'),
-              webPreferences: { contextIsolation: true, webSecurity: false }
+              webPreferences: {
+                contextIsolation: true,
+                webSecurity: false,
+                preload: path.join(__dirname, 'preload.js')
+              }
             });
             Menu.setApplicationMenu(null);
             win.loadFile(path.join(__dirname, 'www', 'index.html'));
           }
 
-          function checkForUpdates() {
-            if (!app.isPackaged) return;
-            // Downloads quietly in the background and installs when the app is
-            // closed, so it never interrupts a quiz in progress.
+          function setupUpdater() {
+            const current = app.getVersion();
+            // Downloads in the background; installs when the app is closed,
+            // or right away if the student taps "Restart now".
             autoUpdater.autoDownload = true;
             autoUpdater.autoInstallOnAppQuit = true;
-            autoUpdater.on('error', () => {});
-            autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+            autoUpdater.on('checking-for-update', () => send({ state: 'checking', current }));
+            autoUpdater.on('update-available', (i) => send({ state: 'available', current, version: i.version }));
+            autoUpdater.on('update-not-available', () => send({ state: 'none', current }));
+            autoUpdater.on('download-progress', (p) => send({ state: 'progress', current, percent: Math.round(p.percent) }));
+            autoUpdater.on('update-downloaded', (i) => send({ state: 'downloaded', current, version: i.version }));
+            autoUpdater.on('error', () => send({ state: 'error', current }));
           }
 
+          // The page (updater.js) asks for a check each time the app opens.
+          ipcMain.on('updater-check', () => {
+            if (!app.isPackaged) return send({ state: 'none', current: app.getVersion() });
+            autoUpdater.checkForUpdates().catch(() => send({ state: 'error', current: app.getVersion() }));
+          });
+          ipcMain.on('updater-install', () => autoUpdater.quitAndInstall(true, true));
+
           app.whenReady().then(() => {
+            setupUpdater();
             createWindow();
-            checkForUpdates();
-            // Re-check every 30 minutes in case the app stays open all day.
-            setInterval(checkForUpdates, 30 * 60 * 1000);
           });
           app.on('window-all-closed', () => app.quit());
+          EOF
+
+          cat > winapp/preload.js <<'EOF'
+          const { contextBridge, ipcRenderer } = require('electron');
+          contextBridge.exposeInMainWorld('gnhsUpdater', {
+            check: () => ipcRenderer.send('updater-check'),
+            install: () => ipcRenderer.send('updater-install'),
+            onStatus: (cb) => ipcRenderer.on('updater-status', (_e, s) => cb(s))
+          });
           EOF
 
           cd winapp
