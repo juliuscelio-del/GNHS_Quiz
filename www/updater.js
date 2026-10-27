@@ -1,14 +1,20 @@
-/* GNHS Quiz — Student app updater (Android)
-   Checks GitHub Releases for a newer APK every time the app opens (and when
-   internet returns). Works only inside the installed Android app.
-   Windows updates itself through electron-updater (see build.yml). */
+/* GNHS Quiz — Student app updater
+   Shows the update popup EVERY time the app opens, whether or not there is an update.
+   - Android: checks GitHub Releases for a newer APK (also when the app returns
+     from the background and internet comes back).
+   - Windows: shows the status reported by electron-updater (see preload.js / main.js).
+   Does nothing in a normal browser. */
 (function () {
   var REPO = 'juliuscelio-del/GNHS_Quiz';
-  var UP_TO_DATE_MS = 10000;   // "Okie pa ag version..." popup
-  var NOTICE_MS = 4000;        // offline / error popups
-  var FETCH_TIMEOUT_MS = 8000; // don't hang forever on a school network with no internet
+  var UP_TO_DATE_MS = 10000;        // "Okie pa ag version..." popup
+  var NOTICE_MS = 4000;             // offline / error popups
+  var FETCH_TIMEOUT_MS = 8000;      // don't hang forever on a network with no internet
+  var RECHECK_MS = 10 * 60 * 1000;  // Android: re-check when resuming if last check was this long ago
 
-  var checking = false, finished = false, shownOffline = false, closeTimer = null;
+  var CHECKING_TITLE = 'paabot kadali....mangita tag update...';
+  var UPTODATE_TITLE = 'Okie pa ag version. Updated pa ne. Padajun gamit';
+
+  var checking = false, finished = false, shownOffline = false, closeTimer = null, lastCheckAt = 0;
 
   // ── Capacitor plugins (no bundler needed) ─────────────────────────────────
   function plugin(name) {
@@ -27,7 +33,7 @@
     background:linear-gradient(90deg,#2e7d32,#66bb6a,#2e7d32)}\
   @keyframes gu-pop{from{opacity:0;transform:scale(.93) translateY(10px)}to{opacity:1;transform:none}}\
   #gnhs-upd .x{position:absolute;top:12px;right:14px;width:30px;height:30px;border:none;border-radius:50%;\
-    background:transparent;color:#8a9a8f;font-size:20px;line-height:30px;padding:0}\
+    background:transparent;color:#8a9a8f;font-size:20px;line-height:30px;padding:0;cursor:pointer}\
   #gnhs-upd .icon{width:68px;height:68px;border-radius:50%;margin:0 auto 14px;display:flex;align-items:center;\
     justify-content:center;background:linear-gradient(135deg,#43a047,#2e7d32);box-shadow:0 8px 20px rgba(46,125,50,.35)}\
   #gnhs-upd .icon.warn{background:linear-gradient(135deg,#ffa726,#ef6c00);box-shadow:0 8px 20px rgba(239,108,0,.35)}\
@@ -38,7 +44,7 @@
   #gnhs-upd p{margin:0 0 4px;color:#5b6b61;font-size:14px;line-height:1.5}\
   #gnhs-upd .row{margin-top:18px;display:flex;gap:10px;justify-content:center}\
   #gnhs-upd .row button{padding:11px 26px;border:1px solid #cfe3d4;border-radius:999px;background:#fff;color:#2e5d3a;\
-    font-size:15px;font-weight:600}\
+    font-size:15px;font-weight:600;cursor:pointer}\
   #gnhs-upd .row button.p{background:linear-gradient(135deg,#43a047,#2e7d32);color:#fff;border-color:#2e7d32;\
     box-shadow:0 6px 16px rgba(46,125,50,.35)}\
   #gnhs-upd .cd{position:absolute;left:0;bottom:0;height:5px;background:linear-gradient(90deg,#66bb6a,#2e7d32);\
@@ -63,7 +69,7 @@
     document.head.appendChild(s);
   }
 
-  // ── Popup (centered on the phone/tablet screen) ───────────────────────────
+  // ── Popup (centered on the screen) ────────────────────────────────────────
   function closePopup() {
     clearTimeout(closeTimer);
     var el = document.getElementById('gnhs-upd');
@@ -99,6 +105,7 @@
 
     if (opts.message) {
       var p = document.createElement('p');
+      p.className = 'msg';
       p.textContent = opts.message;
       card.appendChild(p);
     }
@@ -128,7 +135,58 @@
     document.body.appendChild(overlay);
   }
 
-  // ── Version compare (1.2.3 style) ─────────────────────────────────────────
+  function showUpToDate() {
+    show({ title: UPTODATE_TITLE, icon: 'check' }, UP_TO_DATE_MS);
+  }
+
+  // ═════════════════════════════ WINDOWS ═══════════════════════════════════
+  // main.js runs electron-updater and reports its status through preload.js.
+  function startDesktop() {
+    var D = window.gnhsUpdater;
+    var progressShown = false;
+
+    D.onStatus(function (s) {
+      if (s.state !== 'progress') progressShown = false;
+
+      if (s.state === 'checking') {
+        show({ title: CHECKING_TITLE, spinner: true });
+      } else if (s.state === 'none') {
+        showUpToDate();
+      } else if (s.state === 'available') {
+        show({
+          title: 'Update',
+          message: 'Nag-download na sa update (v' + s.current + ' \u2192 v' + s.version + ')…',
+          spinner: true
+        });
+      } else if (s.state === 'progress') {
+        var msg = 'Nag-download… ' + s.percent + '%';
+        var el = document.querySelector('#gnhs-upd p.msg');
+        if (progressShown && el) {
+          el.textContent = msg;               // update in place, no flicker
+        } else {
+          show({ title: 'Update', message: msg, spinner: true });
+          progressShown = true;
+        }
+      } else if (s.state === 'downloaded') {
+        show({
+          title: 'Update',
+          message: 'Na-download na ang v' + s.version + '. I-restart ang app para ma-install, o ma-install gihapon inig close sa app.',
+          icon: 'download',
+          buttons: [
+            { label: 'Later' },
+            { label: 'Restart now', primary: true, onClick: function () { D.install(); } }
+          ]
+        });
+      } else if (s.state === 'error') {
+        show({ title: "Couldn't check for updates", message: 'Check your internet connection.', icon: 'alert' }, NOTICE_MS);
+      }
+    });
+
+    D.check();   // every time the app opens
+  }
+
+  // ═════════════════════════════ ANDROID ═══════════════════════════════════
+  // Version compare (1.2.3 style)
   function isNewer(a, b) {
     var x = String(a).split('.').map(Number), y = String(b).split('.').map(Number);
     for (var i = 0; i < 3; i++) {
@@ -144,7 +202,7 @@
     else window.open(url, '_system');
   }
 
-  // ── Fetch the latest release, with a timeout ──────────────────────────────
+  // Fetch the latest release, with a timeout
   function fetchLatestRelease() {
     var ctrl = window.AbortController ? new AbortController() : null;
     var timer = ctrl ? setTimeout(function () { ctrl.abort(); }, FETCH_TIMEOUT_MS) : null;
@@ -165,11 +223,12 @@
     });
   }
 
-  // ── Check ─────────────────────────────────────────────────────────────────
   function check() {
     if (finished || checking) return;
     var App = plugin('App');
     if (!App || !App.getInfo) return;        // not the installed app (e.g. opened in a browser)
+
+    lastCheckAt = Date.now();
 
     if (!navigator.onLine) {
       if (!shownOffline) {
@@ -182,16 +241,13 @@
     }
 
     checking = true;
-    show({ title: 'paabot kadali....mangita tag update...', spinner: true });
+    show({ title: CHECKING_TITLE, spinner: true });
 
     Promise.all([App.getInfo(), fetchLatestRelease()]).then(function (res) {
       var current = res[0].version, release = res[1];
       finished = true;
 
-      if (!release) {
-        show({ title: 'Okie pa ag version. Updated pa ne. Padajun gamit', icon: 'check' }, UP_TO_DATE_MS);
-        return;
-      }
+      if (!release) { showUpToDate(); return; }
 
       var latest = String(release.tag_name || '').replace(/^v/, '');
       var apk = (release.assets || []).filter(function (a) { return /\.apk$/i.test(a.name); })[0];
@@ -207,7 +263,7 @@
           ]
         });
       } else {
-        show({ title: 'Okie pa ag version. Updated pa ne. Padajun gamit', icon: 'check' }, UP_TO_DATE_MS);
+        showUpToDate();
       }
     }).catch(function (err) {
       show({
@@ -220,9 +276,26 @@
     }).then(function () { checking = false; });
   }
 
-  function start() {
+  function startAndroid() {
     check();                                          // every time the app opens
     window.addEventListener('online', check);         // when internet returns
+
+    // Coming back from the background: show the popup again (if the last check
+    // was a while ago), since the app isn't restarted when it's reopened.
+    var App = plugin('App');
+    if (App && App.addListener) {
+      App.addListener('appStateChange', function (st) {
+        if (st && st.isActive && Date.now() - lastCheckAt > RECHECK_MS) {
+          finished = false; shownOffline = false;
+          check();
+        }
+      });
+    }
+  }
+
+  function start() {
+    if (window.gnhsUpdater) startDesktop();           // Windows (Electron)
+    else startAndroid();                              // Android (Capacitor); no-op in a browser
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start);
