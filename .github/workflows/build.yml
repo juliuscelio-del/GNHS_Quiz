@@ -5,6 +5,13 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
+env:
+  # Every build gets a new version: 1.0.1, 1.0.2, 1.0.3 ...
+  VERSION: 1.0.${{ github.run_number }}
+
 jobs:
   android:
     runs-on: ubuntu-latest
@@ -14,23 +21,48 @@ jobs:
         with: { node-version: 20, cache: npm }
       - uses: actions/setup-java@v4
         with: { distribution: temurin, java-version: 17 }
-      - run: npm ci
+      - run: npm install
       - run: npm test
+
       - name: Create Android project
         run: |
           [ -d android ] || npx cap add android
           npx cap sync android
+
       - name: Generate app icons
         run: |
           npm install --no-save @capacitor/assets
           npx capacitor-assets generate --android
+
+      # Android only lets an APK update an installed app if both are signed with
+      # the SAME key. We keep one keystore in a repo secret and reuse it.
+      - name: Restore signing key
+        env:
+          KS: ${{ secrets.DEBUG_KEYSTORE_B64 }}
+        run: |
+          if [ -z "$KS" ]; then
+            echo "::warning::DEBUG_KEYSTORE_B64 secret is missing. This APK gets a random key and will NOT update over older installs."
+          else
+            mkdir -p ~/.android
+            echo "$KS" | base64 -d > ~/.android/debug.keystore
+          fi
+
+      - name: Set app version
+        run: |
+          sed -i -E "s/versionCode [0-9]+/versionCode ${{ github.run_number }}/; s/versionName \"[^\"]*\"/versionName \"$VERSION\"/" android/app/build.gradle
+          grep -nE "versionCode|versionName" android/app/build.gradle
+
       - name: Build debug APK
         working-directory: android
         run: ./gradlew assembleDebug
+
+      - name: Rename APK
+        run: mv android/app/build/outputs/apk/debug/*.apk GNHS-Quiz-Android.apk
+
       - uses: actions/upload-artifact@v4
         with:
           name: GNHS-Quiz-Android
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: GNHS-Quiz-Android.apk
           if-no-files-found: error
 
   windows:
@@ -39,9 +71,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with: { node-version: 20, cache: npm }
-      - run: npm ci
+      - run: npm install
       - run: npm test
-      - name: Package Windows app (Electron wrapper around www)
+
+      - name: Package Windows app (Electron wrapper around www, with auto-update)
         shell: bash
         run: |
           mkdir winapp
@@ -52,23 +85,39 @@ jobs:
           cat > winapp/package.json <<'EOF'
           {
             "name": "gnhs-quiz",
-            "version": "1.0.0",
+            "version": "__VERSION__",
             "description": "GNHS Quiz",
             "author": "GNHS",
             "main": "main.js",
+            "dependencies": {
+              "electron-updater": "^6.3.0"
+            },
             "build": {
               "appId": "com.gnhs.quiz",
               "productName": "GNHS Quiz",
               "files": ["main.js", "build/icon.png", "www/**/*"],
-              "win": { "target": "portable", "icon": "build/icon.png" },
-              "portable": { "artifactName": "GNHS-Quiz-Windows.exe" }
+              "win": { "target": "nsis", "icon": "build/icon.png" },
+              "nsis": {
+                "oneClick": true,
+                "perMachine": false,
+                "artifactName": "GNHS-Quiz-Setup.exe"
+              },
+              "publish": {
+                "provider": "github",
+                "owner": "juliuscelio-del",
+                "repo": "GNHS_Quiz"
+              }
             }
           }
           EOF
 
+          sed -i "s/__VERSION__/$VERSION/" winapp/package.json
+
           cat > winapp/main.js <<'EOF'
           const { app, BrowserWindow, Menu } = require('electron');
           const path = require('path');
+          const { autoUpdater } = require('electron-updater');
+
           function createWindow() {
             const win = new BrowserWindow({
               width: 1200,
@@ -80,15 +129,59 @@ jobs:
             Menu.setApplicationMenu(null);
             win.loadFile(path.join(__dirname, 'www', 'index.html'));
           }
-          app.whenReady().then(createWindow);
+
+          function checkForUpdates() {
+            if (!app.isPackaged) return;
+            // Downloads quietly in the background and installs when the app is
+            // closed, so it never interrupts a quiz in progress.
+            autoUpdater.autoDownload = true;
+            autoUpdater.autoInstallOnAppQuit = true;
+            autoUpdater.on('error', () => {});
+            autoUpdater.checkForUpdatesAndNotify().catch(() => {});
+          }
+
+          app.whenReady().then(() => {
+            createWindow();
+            checkForUpdates();
+            // Re-check every 30 minutes in case the app stays open all day.
+            setInterval(checkForUpdates, 30 * 60 * 1000);
+          });
           app.on('window-all-closed', () => app.quit());
           EOF
 
           cd winapp
+          npm install
           npm install --save-dev electron@31 electron-builder@24
-          npx electron-builder --win portable --publish never
+          npx electron-builder --win nsis --publish never
+
       - uses: actions/upload-artifact@v4
         with:
           name: GNHS-Quiz-Windows
-          path: winapp/dist/GNHS-Quiz-Windows.exe
+          path: |
+            winapp/dist/GNHS-Quiz-Setup.exe
+            winapp/dist/GNHS-Quiz-Setup.exe.blockmap
+            winapp/dist/latest.yml
           if-no-files-found: error
+
+  # One release job for both platforms, so the two builds never race to create
+  # the same tag. updater.js reads the .apk, electron-updater reads latest.yml.
+  release:
+    needs: [android, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: List files
+        run: ls -R artifacts
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ env.VERSION }}
+          name: GNHS Quiz v${{ env.VERSION }}
+          files: |
+            artifacts/GNHS-Quiz-Android/GNHS-Quiz-Android.apk
+            artifacts/GNHS-Quiz-Windows/GNHS-Quiz-Setup.exe
+            artifacts/GNHS-Quiz-Windows/GNHS-Quiz-Setup.exe.blockmap
+            artifacts/GNHS-Quiz-Windows/latest.yml
