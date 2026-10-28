@@ -1,8 +1,9 @@
 /* GNHS Quiz — Student app updater
    Shows the update popup EVERY time the app opens, whether or not there is an update.
    The popup has NO close button: students can't dismiss it.
-   - Android: checks GitHub Releases for a newer APK (also when the app returns
-     from the background and internet comes back).
+   - Android: checks GitHub Releases. If a newer version exists it downloads the new
+     web files INSIDE the app (live update, no APK install) and reloads. Only if that
+     is impossible does it fall back to downloading a new APK.
    - Windows: shows the status reported by electron-updater (see preload.js / main.js).
    Does nothing in a normal browser. */
 (function () {
@@ -29,6 +30,13 @@
     var C = window.Capacitor;
     return C && C.Plugins && C.Plugins[name] ? C.Plugins[name] : null;
   }
+
+  // Live-update plugin: must confirm on EVERY start that the current web files
+  // loaded fine, otherwise the plugin rolls back to the previous version.
+  (function () {
+    var U = plugin('CapacitorUpdater');
+    if (U && U.notifyAppReady) { try { U.notifyAppReady(); } catch (e) {} }
+  })();
 
   // ── Styles ────────────────────────────────────────────────────────────────
   // Palette: ube #2a0f73 (card) · dragonfruit #ff2e93 · mango #ffc21a ·
@@ -339,24 +347,68 @@
     });
   }
 
+  // Version of the code running right now: the live-update bundle if one is
+  // active, otherwise the version of the installed APK.
+  function currentVersion(App) {
+    return App.getInfo().then(function (info) {
+      var U = plugin('CapacitorUpdater');
+      if (!U || !U.current) return info.version;
+      return U.current().then(function (c) {
+        var v = c && c.bundle && c.bundle.version;
+        return (v && v !== 'builtin' && isNewer(v, info.version)) ? v : info.version;
+      }, function () { return info.version; });
+    });
+  }
+
+  // Old way: download a whole new APK (needs the system installer).
+  function showApkUpdate(current, latest, apk) {
+    var update = { label: 'Update now', primary: true, keep: true, onClick: function () { openUrl(apk.browser_download_url); } };
+    show({
+      title: 'Update',
+      message: 'Pislita ag update basin naa Updated na App',
+      chip: 'v' + current + ' \u2192 v' + latest,
+      icon: 'download',
+      buttons: FORCE_UPDATE ? [update] : [{ label: 'Later' }, update]
+    });
+  }
+
+  // New way: download the new web files inside the app and reload. No APK, no installer.
+  function liveUpdate(current, latest, bundle, apk) {
+    var U = plugin('CapacitorUpdater');
+    var chip = 'v' + current + ' \u2192 v' + latest;
+
+    function fail() {
+      if (apk) showApkUpdate(current, latest, apk);
+      else show({ title: "Couldn't update", message: 'Check your internet connection, then open the app again.', icon: 'alert' }, NOTICE_MS);
+    }
+
+    show({ title: 'Update', message: 'Nag-download na sa update\u2026', chip: chip, spinner: true, progress: 0 });
+    try {
+      U.addListener('download', function (info) {
+        var pc = Math.max(0, Math.min(100, Math.round((info && info.percent) || 0)));
+        setProgress(pc, 'Nag-download\u2026 ' + pc + '%');
+      });
+    } catch (e) {}
+
+    U.download({ url: bundle.browser_download_url, version: latest }).then(function (b) {
+      show({ title: 'Update', message: 'Na-download na. Nag-install\u2026', chip: chip, icon: 'download' });
+      return U.set({ id: b.id });          // switches to the new files and reloads the app
+    }).catch(fail);
+  }
+
   function renderResult(current, release) {
     if (!release) { showUpToDate(); return; }
 
     var latest = String(release.tag_name || '').replace(/^v/, '');
-    var apk = (release.assets || []).filter(function (a) { return /\.apk$/i.test(a.name); })[0];
+    var assets = release.assets || [];
+    var apk = assets.filter(function (a) { return /\.apk$/i.test(a.name); })[0];
+    var bundle = assets.filter(function (a) { return a.name === 'www-bundle.zip'; })[0];
 
-    if (apk && isNewer(latest, current)) {
-      var update = { label: 'Update now', primary: true, keep: true, onClick: function () { openUrl(apk.browser_download_url); } };
-      show({
-        title: 'Update',
-        message: 'Pislita ag update basin naa Updated na App',
-        chip: 'v' + current + ' \u2192 v' + latest,
-        icon: 'download',
-        buttons: FORCE_UPDATE ? [update] : [{ label: 'Later' }, update]
-      });
-    } else {
-      showUpToDate();
-    }
+    if (!isNewer(latest, current)) { showUpToDate(); return; }
+
+    if (bundle && plugin('CapacitorUpdater')) liveUpdate(current, latest, bundle, apk);
+    else if (apk) showApkUpdate(current, latest, apk);
+    else showUpToDate();
   }
 
   function check() {
@@ -381,10 +433,10 @@
     show({ title: CHECKING_TITLE, spinner: true });
     armWatchdog();
 
-    Promise.all([App.getInfo(), fetchLatestRelease()]).then(function (res) {
+    Promise.all([currentVersion(App), fetchLatestRelease()]).then(function (res) {
       disarmWatchdog();
       finished = true;
-      return afterMin(startedAt, function () { renderResult(res[0].version, res[1]); });
+      return afterMin(startedAt, function () { renderResult(res[0], res[1]); });
     }).catch(function (err) {
       disarmWatchdog();
       return afterMin(startedAt, function () {
