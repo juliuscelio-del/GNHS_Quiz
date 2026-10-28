@@ -7,7 +7,8 @@
    Does nothing in a normal browser. */
 (function () {
   var REPO = 'juliuscelio-del/GNHS_Quiz';
-  var UP_TO_DATE_MS = 10000;        // "Okie pa ag version..." popup
+  var CHECKING_MS = 10000;          // "paabot kadali..." popup stays on screen this long
+  var UP_TO_DATE_MS = 5000;         // "Okie pa ag version..." popup stays this long
   var NOTICE_MS = 4000;             // offline / error popups
   var FETCH_TIMEOUT_MS = 8000;      // don't hang forever on a network with no internet
   var WATCHDOG_MS = 25000;          // safety: a "checking" popup can never stay on screen longer than this
@@ -235,9 +236,26 @@
     var D = window.gnhsUpdater;
     var verChip = '';
 
+    var gateUntil = 0, queue = [], gateTimer = null;
+
+    // The "checking" popup stays for CHECKING_MS; later statuses wait their turn.
     D.onStatus(function (s) {
       if (s.state !== 'checking') disarmWatchdog();
+      if (s.state === 'checking') {
+        gateUntil = Date.now() + CHECKING_MS;
+        queue = [];
+        clearTimeout(gateTimer);
+        gateTimer = setTimeout(flush, CHECKING_MS);
+      } else if (Date.now() < gateUntil) {
+        queue.push(s);
+        return;
+      }
+      handle(s);
+    });
 
+    function flush() { var q = queue; queue = []; q.forEach(handle); }
+
+    function handle(s) {
       if (s.state === 'checking') {
         show({ title: CHECKING_TITLE, spinner: true });
         armWatchdog();
@@ -270,7 +288,7 @@
       } else if (s.state === 'error') {
         show({ title: "Couldn't check for updates", message: 'Check your internet connection.', icon: 'alert' }, NOTICE_MS);
       }
-    });
+    }
 
     D.check();   // every time the app opens
   }
@@ -313,6 +331,34 @@
     });
   }
 
+  // Run fn only after the "checking" popup has been visible for CHECKING_MS.
+  function afterMin(startedAt, fn) {
+    var left = Math.max(0, CHECKING_MS - (Date.now() - startedAt));
+    return new Promise(function (resolve) {
+      setTimeout(function () { try { fn(); } catch (e) {} resolve(); }, left);
+    });
+  }
+
+  function renderResult(current, release) {
+    if (!release) { showUpToDate(); return; }
+
+    var latest = String(release.tag_name || '').replace(/^v/, '');
+    var apk = (release.assets || []).filter(function (a) { return /\.apk$/i.test(a.name); })[0];
+
+    if (apk && isNewer(latest, current)) {
+      var update = { label: 'Update now', primary: true, keep: true, onClick: function () { openUrl(apk.browser_download_url); } };
+      show({
+        title: 'Update',
+        message: 'Pislita ag update basin naa Updated na App',
+        chip: 'v' + current + ' \u2192 v' + latest,
+        icon: 'download',
+        buttons: FORCE_UPDATE ? [update] : [{ label: 'Later' }, update]
+      });
+    } else {
+      showUpToDate();
+    }
+  }
+
   function check() {
     if (finished || checking) return;
     var App = plugin('App');
@@ -331,40 +377,25 @@
     }
 
     checking = true;
+    var startedAt = Date.now();
     show({ title: CHECKING_TITLE, spinner: true });
     armWatchdog();
 
     Promise.all([App.getInfo(), fetchLatestRelease()]).then(function (res) {
       disarmWatchdog();
-      var current = res[0].version, release = res[1];
       finished = true;
-
-      if (!release) { showUpToDate(); return; }
-
-      var latest = String(release.tag_name || '').replace(/^v/, '');
-      var apk = (release.assets || []).filter(function (a) { return /\.apk$/i.test(a.name); })[0];
-
-      if (apk && isNewer(latest, current)) {
-        var update = { label: 'Update now', primary: true, keep: true, onClick: function () { openUrl(apk.browser_download_url); } };
-        show({
-          title: 'Update',
-          message: 'Pislita ag update basin naa Updated na App',
-          chip: 'v' + current + ' \u2192 v' + latest,
-          icon: 'download',
-          buttons: FORCE_UPDATE ? [update] : [{ label: 'Later' }, update]
-        });
-      } else {
-        showUpToDate();
-      }
+      return afterMin(startedAt, function () { renderResult(res[0].version, res[1]); });
     }).catch(function (err) {
       disarmWatchdog();
-      show({
-        title: "Couldn't check for updates",
-        message: err && err.rateLimited
-          ? 'Too many checks right now. Try again in a little while.'
-          : 'Check your internet connection.',
-        icon: 'alert'
-      }, NOTICE_MS);
+      return afterMin(startedAt, function () {
+        show({
+          title: "Couldn't check for updates",
+          message: err && err.rateLimited
+            ? 'Too many checks right now. Try again in a little while.'
+            : 'Check your internet connection.',
+          icon: 'alert'
+        }, NOTICE_MS);
+      });
     }).then(function () { checking = false; });
   }
 
