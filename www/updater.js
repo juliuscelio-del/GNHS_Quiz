@@ -2,8 +2,9 @@
    Shows the update popup EVERY time the app opens, whether or not there is an update.
    The popup has NO close button: students can't dismiss it.
    - Android: checks GitHub Releases. If a newer version exists it downloads the new
-     web files INSIDE the app (live update, no APK install) and reloads. Only if that
-     is impossible does it fall back to downloading a new APK.
+     web files INSIDE the app (live update, no APK install) and reloads. If that is
+     impossible it downloads the new APK INSIDE the app (progress bar in the popup,
+     no browser) and opens Android's installer. Nothing is ever sent to a browser.
    - Windows: shows the status reported by electron-updater (see preload.js / main.js).
    Does nothing in a normal browser. */
 (function () {
@@ -24,11 +25,17 @@
 
   var checking = false, finished = false, shownOffline = false;
   var closeTimer = null, watchdog = null, lastCheckAt = 0;
+  var resumeInstall = null;         // set while we wait for the student to allow installs
 
   // ── Capacitor plugins (no bundler needed) ─────────────────────────────────
   function plugin(name) {
     var C = window.Capacitor;
-    return C && C.Plugins && C.Plugins[name] ? C.Plugins[name] : null;
+    if (C && C.Plugins && C.Plugins[name]) return C.Plugins[name];
+    // Plugins written natively (like ApkInstaller) may not be in C.Plugins yet
+    if (name === 'ApkInstaller' && C && C.registerPlugin && C.isPluginAvailable && C.isPluginAvailable(name)) {
+      try { return C.registerPlugin(name); } catch (e) {}
+    }
+    return null;
   }
 
   // Live-update plugin: must confirm on EVERY start that the current web files
@@ -224,8 +231,10 @@
     if (firstPrimary) firstPrimary.focus();
   }
 
+  var appVersionLabel = '';   // e.g. "v1.0.25 · in-app updater" (proves which updater is running)
+
   function showUpToDate() {
-    show({ title: UPTODATE_TITLE, icon: 'check' }, UP_TO_DATE_MS);
+    show({ title: UPTODATE_TITLE, icon: 'check', chip: appVersionLabel || undefined }, UP_TO_DATE_MS);
   }
 
   // Update the download popup in place (no flicker)
@@ -312,12 +321,6 @@
     return false;
   }
 
-  function openUrl(url) {
-    var B = plugin('Browser');
-    if (B && B.open) B.open({ url: url });
-    else window.open(url, '_system');
-  }
-
   // Fetch the latest release, with a timeout
   function fetchLatestRelease() {
     var ctrl = window.AbortController ? new AbortController() : null;
@@ -360,15 +363,78 @@
     });
   }
 
-  // Old way: download a whole new APK (needs the system installer).
+  // ── In-app APK update ─────────────────────────────────────────────────────
+  // The APK is downloaded by the app itself (ApkInstaller plugin, see build.yml),
+  // with a progress bar in this popup. Android then shows its own "Install"
+  // screen on top of the app. No browser is ever opened.
+
+  // Ask Android to install the downloaded APK. The very first time, Android
+  // needs the student to allow "install from this app" in Settings.
+  function installApk(A, chip) {
+    A.canInstall().then(function (r) {
+      if (r && r.allowed === false) {
+        resumeInstall = function () { installApk(A, chip); };   // retried when the app comes back
+        show({
+          title: 'Update',
+          message: 'I-on ang "Allow from this source" sa Settings, dayon balik sa app.',
+          chip: chip,
+          icon: 'alert',
+          buttons: [{ label: 'Open settings', primary: true, keep: true, onClick: function () { A.openInstallSettings(); } }]
+        });
+        return;
+      }
+      resumeInstall = null;
+      show({
+        title: 'Update',
+        message: 'Pindota ang "Install" sa sunod nga screen.',
+        chip: chip,
+        icon: 'download',
+        buttons: [{ label: 'Install', primary: true, keep: true, onClick: function () { A.install(); } }]
+      });
+      A.install();
+    }).catch(function () {
+      show({
+        title: "Couldn't install",
+        message: 'Subli-i pag open ang app.',
+        icon: 'alert',
+        buttons: [{ label: 'Try again', primary: true, keep: true, onClick: function () { installApk(A, chip); } }]
+      });
+    });
+  }
+
+  function downloadApk(A, current, latest, apk) {
+    var chip = 'v' + current + ' \u2192 v' + latest;
+    show({ title: 'Update', message: 'Nag-download na sa update\u2026', chip: chip, spinner: true, progress: 0 });
+
+    try {
+      A.addListener('progress', function (info) {
+        var pc = Math.max(0, Math.min(100, Math.round((info && info.percent) || 0)));
+        setProgress(pc, 'Nag-download\u2026 ' + pc + '%');
+      });
+    } catch (e) {}
+
+    A.download({ url: apk.browser_download_url }).then(function () {
+      installApk(A, chip);
+    }).catch(function () {
+      show({
+        title: "Couldn't download",
+        message: 'Check your internet connection.',
+        chip: chip,
+        icon: 'alert',
+        buttons: [{ label: 'Try again', primary: true, keep: true, onClick: function () { downloadApk(A, current, latest, apk); } }]
+      });
+    });
+  }
+
   function showApkUpdate(current, latest, apk) {
-    var update = { label: 'Update now', primary: true, keep: true, onClick: function () { openUrl(apk.browser_download_url); } };
+    var A = plugin('ApkInstaller');
+    if (A) { downloadApk(A, current, latest, apk); return; }
+    // Installed app is too old to contain the in-app installer. Tell the student once.
     show({
       title: 'Update',
-      message: 'Pislita ag update basin naa Updated na App',
+      message: 'Kinahanglan i-install pag-usab ang app gikan sa teacher (usa ra ni).',
       chip: 'v' + current + ' \u2192 v' + latest,
-      icon: 'download',
-      buttons: FORCE_UPDATE ? [update] : [{ label: 'Later' }, update]
+      icon: 'alert'
     });
   }
 
@@ -436,6 +502,7 @@
     Promise.all([currentVersion(App), fetchLatestRelease()]).then(function (res) {
       disarmWatchdog();
       finished = true;
+      appVersionLabel = 'v' + res[0] + ' \u00b7 in-app updater';
       return afterMin(startedAt, function () { renderResult(res[0], res[1]); });
     }).catch(function (err) {
       disarmWatchdog();
@@ -455,12 +522,13 @@
     check();                                          // every time the app opens
     window.addEventListener('online', check);         // when internet returns
 
-    // Coming back from the background: show the popup again (if the last check
-    // was a while ago), since the app isn't restarted when it's reopened.
+    // Coming back from the background (or from Android's Settings screen).
     var App = plugin('App');
     if (App && App.addListener) {
       App.addListener('appStateChange', function (st) {
-        if (st && st.isActive && Date.now() - lastCheckAt > RECHECK_MS) {
+        if (!st || !st.isActive) return;
+        if (resumeInstall) { var f = resumeInstall; f(); return; }   // student just allowed installs
+        if (Date.now() - lastCheckAt > RECHECK_MS) {
           finished = false; shownOffline = false;
           check();
         }
