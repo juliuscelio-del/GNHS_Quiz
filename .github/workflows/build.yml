@@ -67,19 +67,54 @@ jobs:
           sed -i -E "s/versionCode [0-9]+/versionCode ${{ github.run_number }}/; s/versionName \"[^\"]*\"/versionName \"$VERSION\"/" android/app/build.gradle
           grep -nE "versionCode|versionName" android/app/build.gradle
 
-      - name: Build debug APK
+      # The build tries 3 ways, so a problem with the live-update plugin can never
+      # stop a release: (1) Java 17 + plugin, (2) Java 21 + plugin, (3) no plugin.
+      - name: Build debug APK (Java 17, with live updates)
+        id: build
+        continue-on-error: true
         working-directory: android
         run: ./gradlew assembleDebug
+
+      - name: Switch to Java 21
+        if: steps.build.outcome == 'failure'
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 21 }
+
+      - name: Build debug APK (Java 21, with live updates)
+        id: build21
+        if: steps.build.outcome == 'failure'
+        continue-on-error: true
+        working-directory: android
+        run: |
+          ./gradlew --stop || true
+          ./gradlew assembleDebug
+
+      - name: Switch back to Java 17
+        if: steps.build.outcome == 'failure' && steps.build21.outcome == 'failure'
+        uses: actions/setup-java@v4
+        with: { distribution: temurin, java-version: 17 }
+
+      - name: Fallback - build APK without live updates
+        if: steps.build.outcome == 'failure' && steps.build21.outcome == 'failure'
+        run: |
+          echo "::warning::The live-update plugin could not be built. Making a plain APK instead. Students get APK updates until this is fixed."
+          npm uninstall @capgo/capacitor-updater
+          npx cap sync android
+          cd android
+          ./gradlew --stop || true
+          ./gradlew assembleDebug
 
       - name: Rename APK
         run: mv android/app/build/outputs/apk/debug/*.apk GNHS-Quiz-Android.apk
 
       # The web files as a zip (index.html at the top). The installed app downloads this.
       - name: Make live-update bundle
+        if: steps.build.outcome == 'success' || steps.build21.outcome == 'success'
         run: |
           WEBDIR=$(node -p "require('./capacitor.config.json').webDir || 'www'")
           (cd "$WEBDIR" && zip -qr "$GITHUB_WORKSPACE/www-bundle.zip" . -x '.*' -x '*/.*')
           unzip -l www-bundle.zip
+          echo "::notice::Live-update bundle created. Installed apps will update without a new APK."
 
       - uses: actions/upload-artifact@v4
         with:
