@@ -1,5 +1,6 @@
 /* GNHS Quiz — Student app updater
    Shows the update popup EVERY time the app opens, whether or not there is an update.
+   The popup has NO close button: students can't dismiss it.
    - Android: checks GitHub Releases for a newer APK (also when the app returns
      from the background and internet comes back).
    - Windows: shows the status reported by electron-updater (see preload.js / main.js).
@@ -9,12 +10,18 @@
   var UP_TO_DATE_MS = 10000;        // "Okie pa ag version..." popup
   var NOTICE_MS = 4000;             // offline / error popups
   var FETCH_TIMEOUT_MS = 8000;      // don't hang forever on a network with no internet
+  var WATCHDOG_MS = 25000;          // safety: a "checking" popup can never stay on screen longer than this
   var RECHECK_MS = 10 * 60 * 1000;  // Android: re-check when resuming if last check was this long ago
+
+  // true  = when an update exists, students MUST update (no "Later" button).
+  // false = students also get a "Later" button.
+  var FORCE_UPDATE = true;
 
   var CHECKING_TITLE = 'paabot kadali....mangita tag update...';
   var UPTODATE_TITLE = 'Okie pa ag version. Updated pa ne. Padajun gamit';
 
-  var checking = false, finished = false, shownOffline = false, closeTimer = null, lastCheckAt = 0;
+  var checking = false, finished = false, shownOffline = false;
+  var closeTimer = null, watchdog = null, lastCheckAt = 0;
 
   // ── Capacitor plugins (no bundler needed) ─────────────────────────────────
   function plugin(name) {
@@ -23,42 +30,81 @@
   }
 
   // ── Styles ────────────────────────────────────────────────────────────────
-  var css = '\
-  #gnhs-upd{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;\
-    background:rgba(15,40,25,.45);font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}\
-  #gnhs-upd .card{position:relative;width:min(340px,88vw);border-radius:22px;overflow:hidden;text-align:center;\
-    padding:30px 24px 32px;background:linear-gradient(165deg,#fff 0%,#f0f9f2 100%);border:1px solid #dcefe2;\
-    box-shadow:0 18px 50px rgba(20,60,35,.35);animation:gu-pop .28s ease-out both}\
-  #gnhs-upd .card:before{content:"";position:absolute;top:0;left:0;right:0;height:6px;\
-    background:linear-gradient(90deg,#2e7d32,#66bb6a,#2e7d32)}\
-  @keyframes gu-pop{from{opacity:0;transform:scale(.93) translateY(10px)}to{opacity:1;transform:none}}\
-  #gnhs-upd .x{position:absolute;top:12px;right:14px;width:30px;height:30px;border:none;border-radius:50%;\
-    background:transparent;color:#8a9a8f;font-size:20px;line-height:30px;padding:0;cursor:pointer}\
-  #gnhs-upd .icon{width:68px;height:68px;border-radius:50%;margin:0 auto 14px;display:flex;align-items:center;\
-    justify-content:center;background:linear-gradient(135deg,#43a047,#2e7d32);box-shadow:0 8px 20px rgba(46,125,50,.35)}\
-  #gnhs-upd .icon.warn{background:linear-gradient(135deg,#ffa726,#ef6c00);box-shadow:0 8px 20px rgba(239,108,0,.35)}\
-  #gnhs-upd .ring{width:56px;height:56px;margin:6px auto 20px;border-radius:50%;border:5px solid #d7ecdc;\
-    border-top-color:#2e7d32;animation:gu-spin .9s linear infinite}\
-  @keyframes gu-spin{to{transform:rotate(360deg)}}\
-  #gnhs-upd h2{margin:0 0 8px;font-size:19px;line-height:1.35;font-weight:700;color:#1b4332}\
-  #gnhs-upd p{margin:0 0 4px;color:#5b6b61;font-size:14px;line-height:1.5}\
-  #gnhs-upd .row{margin-top:18px;display:flex;gap:10px;justify-content:center}\
-  #gnhs-upd .row button{padding:11px 26px;border:1px solid #cfe3d4;border-radius:999px;background:#fff;color:#2e5d3a;\
-    font-size:15px;font-weight:600;cursor:pointer}\
-  #gnhs-upd .row button.p{background:linear-gradient(135deg,#43a047,#2e7d32);color:#fff;border-color:#2e7d32;\
-    box-shadow:0 6px 16px rgba(46,125,50,.35)}\
-  #gnhs-upd .cd{position:absolute;left:0;bottom:0;height:5px;background:linear-gradient(90deg,#66bb6a,#2e7d32);\
-    animation:gu-cd linear forwards}\
-  @keyframes gu-cd{from{width:100%}to{width:0}}';
+  // Palette: ube #2a0f73 (card) · dragonfruit #ff2e93 · mango #ffc21a ·
+  //          pandan-teal #00d1b2 · violet #7a5cff
+  var css = [
+    '#gnhs-upd{position:fixed;inset:0;z-index:2147483647;display:flex;align-items:center;justify-content:center;padding:20px;',
+    'background:radial-gradient(circle at 15% 12%,rgba(255,46,147,.6),transparent 46%),',
+    'radial-gradient(circle at 88% 90%,rgba(0,209,178,.5),transparent 46%),rgba(22,6,60,.86);',
+    '-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);',
+    'font-family:"Trebuchet MS","Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,Roboto,sans-serif}',
+
+    // animated gradient frame around the card
+    '#gnhs-upd .frame{width:min(360px,100%);padding:3px;border-radius:28px;',
+    'background:linear-gradient(120deg,#ff2e93,#ffc21a,#00d1b2,#7a5cff,#ff2e93);background-size:300% 300%;',
+    'box-shadow:0 0 40px rgba(255,46,147,.45),0 24px 60px rgba(10,0,40,.6);',
+    'animation:gu-pop .3s ease-out both,gu-flow 5s ease-in-out infinite alternate}',
+    '#gnhs-upd .card{position:relative;overflow:hidden;border-radius:25px;text-align:center;padding:34px 26px 36px;',
+    'background:radial-gradient(circle at 50% -10%,#4a2bb8 0%,#2a0f73 55%,#1d0a54 100%);color:#fff}',
+    '@keyframes gu-pop{from{opacity:0;transform:scale(.93) translateY(10px)}to{opacity:1;transform:none}}',
+    '@keyframes gu-flow{from{background-position:0% 50%}to{background-position:100% 50%}}',
+
+    // status icon
+    '#gnhs-upd .icon{position:relative;width:76px;height:76px;margin:0 auto 18px;border-radius:50%;',
+    'display:flex;align-items:center;justify-content:center}',
+    '#gnhs-upd .icon.ok{background:linear-gradient(135deg,#00d1b2,#7cf29a);box-shadow:0 0 28px rgba(0,209,178,.65)}',
+    '#gnhs-upd .icon.dl{background:linear-gradient(135deg,#ffc21a,#ff2e93);box-shadow:0 0 28px rgba(255,46,147,.65)}',
+    '#gnhs-upd .icon.warn{background:linear-gradient(135deg,#ffb020,#ff4d4d);box-shadow:0 0 28px rgba(255,100,60,.65)}',
+    '#gnhs-upd .icon:after{content:"";position:absolute;inset:-8px;border-radius:50%;',
+    'border:2px solid rgba(255,255,255,.35);animation:gu-pulse 1.8s ease-out 3}',
+    '@keyframes gu-pulse{from{transform:scale(.88);opacity:.9}to{transform:scale(1.25);opacity:0}}',
+
+    // rainbow spinner
+    '#gnhs-upd .ring{width:66px;height:66px;margin:4px auto 22px;border-radius:50%;',
+    'background:conic-gradient(from 0deg,rgba(255,46,147,0),#ff2e93,#ffc21a,#00d1b2,#7a5cff);',
+    '-webkit-mask:radial-gradient(farthest-side,transparent calc(100% - 8px),#000 calc(100% - 7px));',
+    'mask:radial-gradient(farthest-side,transparent calc(100% - 8px),#000 calc(100% - 7px));',
+    'animation:gu-spin .9s linear infinite}',
+    '@keyframes gu-spin{to{transform:rotate(360deg)}}',
+
+    // text
+    '#gnhs-upd h2{margin:0 0 10px;font-size:22px;line-height:1.3;font-weight:800;letter-spacing:-.01em;color:#ffd23f;',
+    'background:linear-gradient(90deg,#ffd23f 0%,#ff7ab6 55%,#7ff3e0 100%);',
+    '-webkit-background-clip:text;background-clip:text;-webkit-text-fill-color:transparent}',
+    '#gnhs-upd p{margin:0;color:#e1d6ff;font-size:15px;line-height:1.55}',
+    '#gnhs-upd .chip{display:inline-block;margin-top:14px;padding:6px 16px;border-radius:999px;',
+    'background:rgba(255,255,255,.1);border:1px solid rgba(255,255,255,.28);color:#ffe27a;',
+    'font-size:13px;font-weight:700;letter-spacing:.02em}',
+
+    // download progress bar
+    '#gnhs-upd .bar{margin:18px 0 0;height:10px;border-radius:999px;background:rgba(255,255,255,.14);overflow:hidden}',
+    '#gnhs-upd .bar i{display:block;height:100%;width:0;border-radius:inherit;',
+    'background:linear-gradient(90deg,#ffd23f,#ff2e93,#7a5cff);transition:width .25s ease}',
+
+    // buttons
+    '#gnhs-upd .row{margin-top:24px;display:flex;gap:10px;justify-content:center;flex-wrap:wrap}',
+    '#gnhs-upd .row button{padding:13px 28px;border-radius:999px;border:2px solid rgba(255,255,255,.3);',
+    'background:transparent;color:#fff;font:inherit;font-size:15px;font-weight:700;cursor:pointer;transition:transform .12s ease}',
+    '#gnhs-upd .row button:active{transform:scale(.96)}',
+    '#gnhs-upd .row button:focus-visible{outline:3px solid #ffd23f;outline-offset:3px}',
+    '#gnhs-upd .row button.p{border:0;background:linear-gradient(135deg,#ff2e93,#ff8a3d);box-shadow:0 8px 24px rgba(255,46,147,.55)}',
+
+    // auto-close countdown
+    '#gnhs-upd .cd{position:absolute;left:0;bottom:0;height:6px;',
+    'background:linear-gradient(90deg,#ffd23f,#ff2e93,#7a5cff);animation:gu-cd linear forwards}',
+    '@keyframes gu-cd{from{width:100%}to{width:0}}',
+
+    '@media (prefers-reduced-motion:reduce){#gnhs-upd .frame,#gnhs-upd .icon:after{animation:none}}'
+  ].join('');
 
   function svg(path) {
-    return '<svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" ' +
+    return '<svg width="36" height="36" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2.6" ' +
            'stroke-linecap="round" stroke-linejoin="round">' + path + '</svg>';
   }
   var ICONS = {
-    check: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
-    download: svg('<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>'),
-    alert: svg('<path d="M12 6v7M12 17.5v.5"/>')
+    check: { cls: 'ok',   html: svg('<path d="M5 12.5l4.5 4.5L19 7.5"/>') },
+    download: { cls: 'dl', html: svg('<path d="M12 4v11M7 11l5 5 5-5M5 20h14"/>') },
+    alert: { cls: 'warn', html: svg('<path d="M12 6v7M12 17.5v.5"/>') }
   };
 
   function addStyle() {
@@ -69,33 +115,45 @@
     document.head.appendChild(s);
   }
 
-  // ── Popup (centered on the screen) ────────────────────────────────────────
+  // ── Popup (centered, NO close button) ─────────────────────────────────────
   function closePopup() {
     clearTimeout(closeTimer);
     var el = document.getElementById('gnhs-upd');
     if (el) el.remove();
   }
 
+  function armWatchdog() {
+    clearTimeout(watchdog);
+    watchdog = setTimeout(function () {
+      checking = false;
+      show({ title: "Couldn't check for updates", message: 'Check your internet connection.', icon: 'alert' }, NOTICE_MS);
+    }, WATCHDOG_MS);
+  }
+  function disarmWatchdog() { clearTimeout(watchdog); }
+
+  /* opts: title, message, chip, icon ('check'|'download'|'alert'), spinner,
+           progress (0-100 → shows a bar), buttons [{label, primary, keep, onClick}] */
   function show(opts, autoCloseMs) {
     closePopup();
     addStyle();
+
     var overlay = document.createElement('div');
     overlay.id = 'gnhs-upd';
+    overlay.setAttribute('role', 'alertdialog');
+    overlay.setAttribute('aria-modal', 'true');
+
+    var frame = document.createElement('div');
+    frame.className = 'frame';
     var card = document.createElement('div');
     card.className = 'card';
-
-    var x = document.createElement('button');
-    x.className = 'x';
-    x.innerHTML = '&times;';
-    x.onclick = closePopup;
-    card.appendChild(x);
 
     var top = document.createElement('div');
     if (opts.spinner) {
       top.className = 'ring';
     } else {
-      top.className = 'icon' + (opts.icon === 'alert' ? ' warn' : '');
-      top.innerHTML = ICONS[opts.icon] || ICONS.check;
+      var ic = ICONS[opts.icon] || ICONS.check;
+      top.className = 'icon ' + ic.cls;
+      top.innerHTML = ic.html;
     }
     card.appendChild(top);
 
@@ -110,14 +168,34 @@
       card.appendChild(p);
     }
 
+    if (opts.chip) {
+      var chip = document.createElement('div');
+      chip.className = 'chip';
+      chip.textContent = opts.chip;
+      card.appendChild(chip);
+    }
+
+    if (typeof opts.progress === 'number') {
+      var bar = document.createElement('div');
+      bar.className = 'bar';
+      var fill = document.createElement('i');
+      fill.style.width = opts.progress + '%';
+      bar.appendChild(fill);
+      card.appendChild(bar);
+    }
+
+    var firstPrimary = null;
     if (opts.buttons && opts.buttons.length) {
       var row = document.createElement('div');
       row.className = 'row';
       opts.buttons.forEach(function (b) {
         var btn = document.createElement('button');
         btn.textContent = b.label;
-        if (b.primary) btn.className = 'p';
-        btn.onclick = function () { closePopup(); if (b.onClick) b.onClick(); };
+        if (b.primary) { btn.className = 'p'; firstPrimary = firstPrimary || btn; }
+        btn.onclick = function () {
+          if (!b.keep) closePopup();          // keep:true = popup stays until the app restarts/updates
+          if (b.onClick) b.onClick();
+        };
         row.appendChild(btn);
       });
       card.appendChild(row);
@@ -131,51 +209,63 @@
       closeTimer = setTimeout(closePopup, autoCloseMs);
     }
 
-    overlay.appendChild(card);
+    frame.appendChild(card);
+    overlay.appendChild(frame);
     document.body.appendChild(overlay);
+    if (firstPrimary) firstPrimary.focus();
   }
 
   function showUpToDate() {
     show({ title: UPTODATE_TITLE, icon: 'check' }, UP_TO_DATE_MS);
   }
 
+  // Update the download popup in place (no flicker)
+  function setProgress(percent, msg) {
+    var m = document.querySelector('#gnhs-upd p.msg');
+    var b = document.querySelector('#gnhs-upd .bar i');
+    if (!m || !b) return false;
+    m.textContent = msg;
+    b.style.width = percent + '%';
+    return true;
+  }
+
   // ═════════════════════════════ WINDOWS ═══════════════════════════════════
   // main.js runs electron-updater and reports its status through preload.js.
   function startDesktop() {
     var D = window.gnhsUpdater;
-    var progressShown = false;
+    var verChip = '';
 
     D.onStatus(function (s) {
-      if (s.state !== 'progress') progressShown = false;
+      if (s.state !== 'checking') disarmWatchdog();
 
       if (s.state === 'checking') {
         show({ title: CHECKING_TITLE, spinner: true });
+        armWatchdog();
       } else if (s.state === 'none') {
         showUpToDate();
       } else if (s.state === 'available') {
+        verChip = 'v' + s.current + ' \u2192 v' + s.version;
         show({
           title: 'Update',
-          message: 'Nag-download na sa update (v' + s.current + ' \u2192 v' + s.version + ')…',
-          spinner: true
+          message: 'Nag-download na sa update\u2026',
+          chip: verChip,
+          spinner: true,
+          progress: 0
         });
       } else if (s.state === 'progress') {
-        var msg = 'Nag-download… ' + s.percent + '%';
-        var el = document.querySelector('#gnhs-upd p.msg');
-        if (progressShown && el) {
-          el.textContent = msg;               // update in place, no flicker
-        } else {
-          show({ title: 'Update', message: msg, spinner: true });
-          progressShown = true;
+        var msg = 'Nag-download\u2026 ' + s.percent + '%';
+        if (!setProgress(s.percent, msg)) {
+          show({ title: 'Update', message: msg, chip: verChip, spinner: true, progress: s.percent });
         }
       } else if (s.state === 'downloaded') {
+        var restart = { label: 'Restart now', primary: true, keep: true, onClick: function () { D.install(); } };
         show({
           title: 'Update',
-          message: 'Na-download na ang v' + s.version + '. I-restart ang app para ma-install, o ma-install gihapon inig close sa app.',
+          message: FORCE_UPDATE
+            ? 'Na-download na ang v' + s.version + '. I-restart ang app para ma-install.'
+            : 'Na-download na ang v' + s.version + '. I-restart ang app para ma-install, o ma-install gihapon inig close sa app.',
           icon: 'download',
-          buttons: [
-            { label: 'Later' },
-            { label: 'Restart now', primary: true, onClick: function () { D.install(); } }
-          ]
+          buttons: FORCE_UPDATE ? [restart] : [{ label: 'Later' }, restart]
         });
       } else if (s.state === 'error') {
         show({ title: "Couldn't check for updates", message: 'Check your internet connection.', icon: 'alert' }, NOTICE_MS);
@@ -242,8 +332,10 @@
 
     checking = true;
     show({ title: CHECKING_TITLE, spinner: true });
+    armWatchdog();
 
     Promise.all([App.getInfo(), fetchLatestRelease()]).then(function (res) {
+      disarmWatchdog();
       var current = res[0].version, release = res[1];
       finished = true;
 
@@ -253,19 +345,19 @@
       var apk = (release.assets || []).filter(function (a) { return /\.apk$/i.test(a.name); })[0];
 
       if (apk && isNewer(latest, current)) {
+        var update = { label: 'Update now', primary: true, keep: true, onClick: function () { openUrl(apk.browser_download_url); } };
         show({
           title: 'Update',
-          message: 'Pislita ag update basin naa Updated na App (v' + current + ' \u2192 v' + latest + ')',
+          message: 'Pislita ag update basin naa Updated na App',
+          chip: 'v' + current + ' \u2192 v' + latest,
           icon: 'download',
-          buttons: [
-            { label: 'Later' },
-            { label: 'Update', primary: true, onClick: function () { openUrl(apk.browser_download_url); } }
-          ]
+          buttons: FORCE_UPDATE ? [update] : [{ label: 'Later' }, update]
         });
       } else {
         showUpToDate();
       }
     }).catch(function (err) {
+      disarmWatchdog();
       show({
         title: "Couldn't check for updates",
         message: err && err.rateLimited
