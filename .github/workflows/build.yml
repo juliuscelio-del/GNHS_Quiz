@@ -24,6 +24,21 @@ jobs:
       - run: npm install
       - run: npm test
 
+      # Live updates: lets the installed app download new web files (www/) by
+      # itself, so a new APK is only needed when native things change.
+      - name: Add live-update plugin
+        run: |
+          MAJOR=$(node -p "require('@capacitor/core/package.json').version.split('.')[0]")
+          npm install "@capgo/capacitor-updater@$MAJOR" || echo "::warning::Could not install @capgo/capacitor-updater@$MAJOR. The app will fall back to APK updates."
+          node -e "
+            const fs = require('fs');
+            const c = JSON.parse(fs.readFileSync('capacitor.config.json', 'utf8'));
+            c.plugins = c.plugins || {};
+            c.plugins.CapacitorUpdater = Object.assign({}, c.plugins.CapacitorUpdater, { autoUpdate: false });
+            fs.writeFileSync('capacitor.config.json', JSON.stringify(c, null, 2));
+          "
+          cat capacitor.config.json
+
       - name: Create Android project
         run: |
           [ -d android ] || npx cap add android
@@ -59,10 +74,19 @@ jobs:
       - name: Rename APK
         run: mv android/app/build/outputs/apk/debug/*.apk GNHS-Quiz-Android.apk
 
+      # The web files as a zip (index.html at the top). The installed app downloads this.
+      - name: Make live-update bundle
+        run: |
+          WEBDIR=$(node -p "require('./capacitor.config.json').webDir || 'www'")
+          (cd "$WEBDIR" && zip -qr "$GITHUB_WORKSPACE/www-bundle.zip" . -x '.*' -x '*/.*')
+          unzip -l www-bundle.zip
+
       - uses: actions/upload-artifact@v4
         with:
           name: GNHS-Quiz-Android
-          path: GNHS-Quiz-Android.apk
+          path: |
+            GNHS-Quiz-Android.apk
+            www-bundle.zip
           if-no-files-found: error
 
   windows:
@@ -194,7 +218,8 @@ jobs:
           if-no-files-found: error
 
   # One release job for both platforms, so the two builds never race to create
-  # the same tag. updater.js reads the .apk, electron-updater reads latest.yml.
+  # the same tag. updater.js reads www-bundle.zip (or the .apk as a fallback),
+  # electron-updater reads latest.yml.
   release:
     needs: [android, windows]
     runs-on: ubuntu-latest
@@ -212,6 +237,7 @@ jobs:
           name: GNHS Quiz v${{ env.VERSION }}
           files: |
             artifacts/GNHS-Quiz-Android/GNHS-Quiz-Android.apk
+            artifacts/GNHS-Quiz-Android/www-bundle.zip
             artifacts/GNHS-Quiz-Windows/GNHS-Quiz-Setup.exe
             artifacts/GNHS-Quiz-Windows/GNHS-Quiz-Setup.exe.blockmap
             artifacts/GNHS-Quiz-Windows/latest.yml
