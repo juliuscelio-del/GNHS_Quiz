@@ -38,6 +38,7 @@ jobs:
             fs.writeFileSync('capacitor.config.json', JSON.stringify(c, null, 2));
           "
           cat capacitor.config.json
+          { echo "### Versions used"; echo '```'; npm ls @capacitor/core @capgo/capacitor-updater 2>&1 | head -10 || true; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create Android project
         run: |
@@ -73,7 +74,22 @@ jobs:
         id: build
         continue-on-error: true
         working-directory: android
-        run: ./gradlew assembleDebug
+        run: |
+          set -o pipefail
+          ./gradlew assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/gradle-java17.log"
+
+      - name: Show why the Java 17 build failed
+        if: steps.build.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          echo "::warning title=Live-update build failed on Java 17::Reason is in the run Summary (scroll down on the run page)."
+          {
+            echo "### Why the Java 17 build failed"
+            echo '```'
+            grep -A14 "What went wrong" gradle-java17.log | head -30 || true
+            grep -E "^e: |error:|Caused by" gradle-java17.log | head -10 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Switch to Java 21
         if: steps.build.outcome == 'failure'
@@ -86,8 +102,22 @@ jobs:
         continue-on-error: true
         working-directory: android
         run: |
+          set -o pipefail
           ./gradlew --stop || true
-          ./gradlew assembleDebug
+          ./gradlew assembleDebug 2>&1 | tee "$GITHUB_WORKSPACE/gradle-java21.log"
+
+      - name: Show why the Java 21 build failed
+        if: steps.build21.outcome == 'failure'
+        continue-on-error: true
+        run: |
+          echo "::warning title=Live-update build failed on Java 21::Reason is in the run Summary (scroll down on the run page)."
+          {
+            echo "### Why the Java 21 build failed"
+            echo '```'
+            grep -A14 "What went wrong" gradle-java21.log | head -30 || true
+            grep -E "^e: |error:|Caused by" gradle-java21.log | head -10 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Switch back to Java 17
         if: steps.build.outcome == 'failure' && steps.build21.outcome == 'failure'
