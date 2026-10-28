@@ -125,6 +125,7 @@ jobs:
 
           function createWindow() {
             win = new BrowserWindow({
+              show: false,
               width: 1200,
               height: 800,
               autoHideMenuBar: true,
@@ -137,6 +138,8 @@ jobs:
             });
             Menu.setApplicationMenu(null);
             win.loadFile(path.join(__dirname, 'www', 'index.html'));
+            // Open maximized (no small-window flicker): show only when ready.
+            win.once('ready-to-show', () => { win.maximize(); win.show(); });
           }
 
           function setupUpdater() {
