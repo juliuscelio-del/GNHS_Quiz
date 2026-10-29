@@ -230,16 +230,23 @@ jobs:
 
       # Android only lets an APK update an installed app if both are signed with
       # the SAME key. We keep one keystore in a repo secret and reuse it.
+      # The build FAILS if the secret is missing, so a random key can never ship.
       - name: Restore signing key
         env:
           KS: ${{ secrets.DEBUG_KEYSTORE_B64 }}
         run: |
           if [ -z "$KS" ]; then
-            echo "::warning::DEBUG_KEYSTORE_B64 secret is missing. This APK gets a random key and will NOT update over older installs."
-          else
-            mkdir -p ~/.android
-            echo "$KS" | base64 -d > ~/.android/debug.keystore
+            echo "::error::DEBUG_KEYSTORE_B64 secret is missing."
+            exit 1
           fi
+          mkdir -p ~/.android
+          echo "$KS" | base64 -d > ~/.android/debug.keystore
+          echo "ANDROID_USER_HOME=$HOME/.android" >> "$GITHUB_ENV"
+          {
+            echo "### Keystore"; echo '```'
+            keytool -list -v -keystore ~/.android/debug.keystore -storepass android -alias androiddebugkey | grep -E "Alias|SHA256|Valid"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Set app version
         run: |
@@ -314,6 +321,16 @@ jobs:
 
       - name: Rename APK
         run: mv android/app/build/outputs/apk/debug/*.apk GNHS-Quiz-Android.apk
+
+      - name: Show APK identity
+        run: |
+          BT=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -1)
+          {
+            echo "### APK identity"; echo '```'
+            $BT/apksigner verify --print-certs GNHS-Quiz-Android.apk | grep "SHA-256" || true
+            $BT/aapt dump badging GNHS-Quiz-Android.apk | grep -E "^package:" || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # The web files as a zip (index.html at the top). The installed app downloads this.
       - name: Make live-update bundle
