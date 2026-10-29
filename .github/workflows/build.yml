@@ -45,6 +45,21 @@ jobs:
           [ -d android ] || npx cap add android
           npx cap sync android
 
+      # The live-update plugin pulls in androidx.work 2.10.x, which demands
+      # compileSdk 35. This project is on compileSdk 34 (Android Gradle plugin
+      # 8.2.1), so pin work-runtime to 2.9.1, which works with compileSdk 34.
+      - name: Pin androidx.work for compileSdk 34
+        run: |
+          cat >> android/build.gradle <<'EOF'
+
+          allprojects {
+              configurations.all {
+                  resolutionStrategy.force 'androidx.work:work-runtime:2.9.1'
+              }
+          }
+          EOF
+          tail -10 android/build.gradle
+
       # In-app APK updates: a tiny native plugin that downloads the new APK
       # INSIDE the app (with progress) and opens Android's installer. This is
       # what replaces "open the browser and download there".
