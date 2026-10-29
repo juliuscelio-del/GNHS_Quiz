@@ -60,6 +60,13 @@ jobs:
           EOF
           tail -10 android/build.gradle
 
+      # The live-update plugin also needs Google Play services, which requires
+      # minSdk 23 (Android 6.0). Capacitor's default is 22, so raise it.
+      - name: Raise minSdk to 23
+        run: |
+          sed -i -E "s/minSdkVersion *= *[0-9]+/minSdkVersion = 23/" android/variables.gradle
+          grep -n "minSdkVersion" android/variables.gradle
+
       # In-app APK updates: a tiny native plugin that downloads the new APK
       # INSIDE the app (with progress) and opens Android's installer. This is
       # what replaces "open the browser and download there".
